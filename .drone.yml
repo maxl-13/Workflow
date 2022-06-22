@@ -1,0 +1,290 @@
+#Configuration Debug
+kind: pipeline
+type: docker
+name: Debug Pipeline
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  event:
+    - push
+  branch:
+    exclude:
+    - main
+    - release-*
+
+
+workspace:
+  path: /drone/src
+
+steps:
+  - name: prepare_variables
+    image: alpine
+    commands:
+      - echo PROJECT_PATH=./**/*.sln >> .env
+      - echo CONFIGURATION=Debug >> .env
+
+  - name: .NET Build Debug
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    commands:
+      - source .env
+      - dotnet restore $PROJECT_PATH
+      - dotnet build $PROJECT_PATH --configuration $CONFIGURATION --no-restore
+  
+  - name: .NET Test Debug
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    commands:
+      - source .env
+      - dotnet test $PROJECT_PATH --configuration $CONFIGURATION
+
+
+---
+#Configuration Release
+kind: pipeline
+type: docker
+name: Release Pipeline
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  event:
+    - push
+    - pull_request
+  branch: 
+    - main
+    - release-*
+
+
+depends_on:
+- Debug Pipeline
+
+workspace:
+  path: /drone/src
+
+steps:
+  - name: prepare_variables
+    image: alpine
+    commands:
+      - echo PROJECT_PATH=./**/*.sln >> .env
+      - echo CONFIGURATION=Release >> .env
+      
+  - name: .NET Build Release
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    commands:
+      - source .env
+      - dotnet restore $PROJECT_PATH
+      - dotnet build $PROJECT_PATH --configuration $CONFIGURATION --no-restore
+  
+  - name: .NET Test Release
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    commands:
+      - source .env
+      - dotnet test $PROJECT_PATH --configuration $CONFIGURATION
+
+
+---
+# Create Release Branch
+kind: pipeline
+type: docker
+name: Prepare Release
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  event:
+    - promote
+  branch: 
+    - main
+
+workspace:
+  path: /drone/src
+
+steps:
+  - name: nbgv prepare release
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    environment:
+      API_KEY:
+        from_secret: GITHUB_PACKAGES_TOKEN
+      BOT_USERNAME:
+        from_secret: BOT_USERNAME
+    commands:
+      - chmod +rx ./Scripts/createReleaseBranch.sh
+      - ./Scripts/createReleaseBranch.sh $BOT_USERNAME $API_KEY $increment
+
+---
+# CD Pipeline
+kind: pipeline
+type: docker
+name: Push NuGet Package and GitHub Release
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  branch:
+  - release-*
+  event:
+  - promote
+
+volumes:
+- name: package_output_vol
+  temp: {}
+- name: asset_output_vol
+  temp: {}
+- name: coverlet_output_vol
+  temp: {}      
+
+workspace:
+  path: /drone/src
+
+depends_on:
+- Debug Pipeline
+  
+steps:
+  - name: prepare_variables
+    image: alpine
+    commands:
+      - echo PROJECT_PATH=./**/*.sln >> .env
+      - echo CONFIGURATION=Release >> .env
+      - echo OUTPUT_PATH=./output >> .env
+      - echo COVERAGE_RESULTS=/root/.coverlet >> .env
+      - echo NUGET_PKG_PATH=/root/.nupkgs >> .env
+      - echo ASSET_PATH=/root/.assets >> .env
+
+  - name: .NET Build Release
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    commands:
+      - source .env
+      - dotnet restore $PROJECT_PATH
+      - dotnet build $PROJECT_PATH --configuration $CONFIGURATION --no-restore --output $OUTPUT_PATH/
+      - cp $OUTPUT_PATH/ClassLibrary1.dll $ASSET_PATH/ClassLibrary1.dll
+    volumes:
+      - name: asset_output_vol
+        path: /root/.assets
+
+  - name: .NET Test Release
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    commands:
+      - source .env
+      - dotnet test $PROJECT_PATH --configuration $CONFIGURATION --collect:"XPlat Code Coverage" --results-directory $COVERAGE_RESULTS/
+    volumes:
+      - name: coverlet_output_vol
+        path: /root/.coverlet
+
+  - name: Create Code Coverage File
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    environment:
+      API_KEY:
+        from_secret: GITHUB_PACKAGES_TOKEN
+    commands:
+      - source .env
+      - apk add zip
+      - chmod +rx ./Scripts/getCoverageHistory.sh
+      - ./Scripts/getCoverageHistory.sh $API_KEY    
+      - chmod +rx ./Scripts/generateCodeCoverage.sh
+      - ./Scripts/generateCodeCoverage.sh "$COVERAGE_RESULTS/**/coverage.cobertura.xml" "$ASSET_PATH" "historydir/"
+    volumes:
+      - name: asset_output_vol
+        path: /root/.assets
+      - name: coverlet_output_vol
+        path: /root/.coverlet
+
+  - name: .NET Pack
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    commands:
+      - source .env
+      - dotnet pack $PROJECT_PATH --configuration $CONFIGURATION --output $NUGET_PKG_PATH/
+    volumes:
+      - name: package_output_vol
+        path: /root/.nupkgs
+
+  - name: .NET NuGet Push 
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    environment:
+      API_KEY:
+        from_secret: GITHUB_PACKAGES_TOKEN
+    commands:
+      - source .env
+      - dotnet nuget push $NUGET_PKG_PATH/*.nupkg --source https://github.deere.com/_registry/nuget/MPS/index.json -k $API_KEY --skip-duplicate
+    volumes:
+      - name: package_output_vol
+        path: /root/.nupkgs
+
+  - name: GitHub Release
+    image: mcr.microsoft.com/dotnet/sdk:6.0-alpine
+    environment:
+      API_KEY:
+        from_secret: GITHUB_PACKAGES_TOKEN
+      BOT_USERNAME:
+        from_secret: BOT_USERNAME
+    commands:
+      - source .env
+      - chmod +rx ./Scripts/ghApiRelease.sh
+      - ./Scripts/ghApiRelease.sh $API_KEY $ASSET_PATH/
+      - chmod +rx ./Scripts/updateCoverageBadges.sh
+      - ./Scripts/updateCoverageBadges.sh $BOT_USERNAME $API_KEY
+    volumes:
+    - name: asset_output_vol
+      path: /root/.assets
+
+
+---
+#Notification
+kind: pipeline
+type: docker
+name: Notifications on Failed Pipeline
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  branch: 
+    - main
+  event:
+    - push
+    - pull_request
+  status:
+    - failure
+
+depends_on:
+  - Debug Pipeline
+  - Release Pipeline
+  - Prepare Release
+  - Push NuGet Package and GitHub Release
+
+steps:
+  - name: E-mail Notification on Failed Pipeline
+    image: drillster/drone-email
+    settings:
+      from: Qual_DroneDoNotReply@JohnDeere.com
+      host: mail.dx.deere.com
+      port: 25
+      recipients:
+      #- ISGMPSOperationsandAutomationTeam@JohnDeere.com
+        - koelblMaximilian@JohnDeere.com
+      recipients_only: true
+      
+      
+  - name: Notify MS Teams on Failed Pipeline
+    image: kuperiu/drone-teams
+    environment:
+      TEAMS_WEBHOOK:
+        from_secret: TEAMS_SECRET_WEBHOOK
+#    failure: ignore
+
+  
+
+
+
+
+
+#Code Coverage
+#https://plugins.drone.io/drone-plugins/drone-codecov/

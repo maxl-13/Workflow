@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RepositoryUrl>https://github.deere.com/MPS/NETStandard-lib</RepositoryUrl>
+    <PackageId>NETStandard-lib</PackageId>
+    <PackageDescription>This package serves as a test package to deliver to nuget and to create github releases and test more things</PackageDescription>
+  </PropertyGroup>
+
+</Project>

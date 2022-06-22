@@ -1,0 +1,82 @@
+name: $(Build.BuildId)_$(SourceBranchName)_$(Date:ddMMyy)
+
+trigger:
+  branches:
+    include:
+    - mainn
+  #tags:
+  #  include:
+  #  - '*'
+
+pool: devops232-aws-isg-material-property-sensing-qual-useast1-vpn-ec2-Windows2019
+
+# Build Debug
+jobs:
+- job: BuildDebug
+  displayName: Build Debug
+  variables:
+    solution: '.\ClassLibrary1\ClassLibrary1.sln'
+    buildPlatform: 'Any CPU'
+    buildConfiguration: 'Debug'
+  
+  steps:
+  - task: UseDotNet@2
+    displayName: 'Use .NET Core sdk'
+    inputs:
+      packageType: sdk
+      version: 6.0.x
+      installationPath: $(Agent.ToolsDirectory)/dotnet
+  - task: NuGetToolInstaller@1
+    displayName: Install NuGet
+  
+  - script: dotnet restore $(solution)
+    displayName: Restore
+
+  - script: dotnet build $(solution) -c $(buildConfiguration) --no-restore
+    displayName: Build
+
+  - script: dotnet test $(solution) -c $(buildConfiguration) --no-build
+    displayName: Test
+
+- job: BuildRelease
+  displayName: Build Release
+  dependsOn: BuildDebug
+  condition: >
+    and(succeeded(), 
+    or(contains(variables['Build.SourceBranch'], 
+    'refs/heads/release-'), contains(variables['Build.SourceBranch'], 
+    'refs/heads/main'), contains(variables['Build.SourceBranch'], 'refs/tags/v')))
+  variables:
+    solution: '.\ClassLibrary1\ClassLibrary1.sln'
+    buildConfiguration: 'Release'
+
+  steps:
+  - task: UseDotNet@2
+    displayName: 'Use .NET Core sdk'
+    inputs:
+      packageType: sdk
+      version: 6.0.x
+      installationPath: $(Agent.ToolsDirectory)/dotnet
+  - task: NuGetToolInstaller@1
+    displayName: Install NuGet
+
+  - script: dotnet restore $(solution)
+    displayName: Restore
+
+  - script: dotnet build $(solution) -c $(buildConfiguration) --no-restore
+    displayName: Build
+ 
+  - script: dotnet test $(solution) -c $(buildConfiguration) --collect:"XPlat Code Coverage" --no-build
+    displayName: Test 
+
+#  - script: dotnet tool install -g dotnet-reportgenerator-globaltool
+#    displayName: Install Reportgenerator
+ 
+  - script: reportgenerator "-reports:.\ClassLibrary1\ClassLibrary1Tests\TestResults\**\coverage.cobertura.xml; .\ClassLibrary1\TestProjectXUnit\TestResults\**\coverage.cobertura.xml" -targetdir:$(Build.SourcesDirectory)/coverlet/reports -reporttypes:"Cobertura"
+    displayName: Create Report
+
+  - task: PublishCodeCoverageResults@1
+    displayName: Publish Code Coverage
+    inputs:
+      codeCoverageTool: 'Cobertura'
+      summaryFileLocation: '$(Build.SourcesDirectory)/coverlet/reports/Cobertura.xml'
